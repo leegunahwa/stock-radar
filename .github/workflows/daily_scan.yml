@@ -1,0 +1,51 @@
+name: Daily Stock Scan
+
+# =============================================================================
+# 每個交易日台北時間 15:30(收盤後 30 分)執行台股籌碼掃描
+# GitHub Actions 用 UTC,15:30 (UTC+8) = 07:30 UTC
+# 完整實作將於 Stage 4 補上,本檔目前為框架
+# =============================================================================
+
+on:
+  schedule:
+    # 週一至週五 07:30 UTC = 台北時間 15:30
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch:  # 允許手動觸發
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scanner
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          EMAIL_SMTP_HOST: ${{ secrets.EMAIL_SMTP_HOST }}
+          EMAIL_SMTP_USER: ${{ secrets.EMAIL_SMTP_USER }}
+          EMAIL_SMTP_PASS: ${{ secrets.EMAIL_SMTP_PASS }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python -m src.main
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-result-${{ github.run_id }}
+          path: output/
+          retention-days: 30
+          if-no-files-found: ignore

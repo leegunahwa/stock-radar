@@ -1,0 +1,75 @@
+# =============================================================================
+# 台股每日籌碼掃描 - 篩選條件設定
+# =============================================================================
+# 修改本檔即可調整篩選條件,毋須改程式碼。
+# 各欄位意義詳見 SPEC.md 或對應 filter 模組。
+# =============================================================================
+
+# === 籌碼面條件 ===
+chip_filter:
+  # 投信當日買超門檻(張)
+  min_investment_trust_buy: 1000
+  # 連續買超天數(連續 N 天有買超才入選)
+  consecutive_buy_days: 3
+  # 是否納入 PTT 關鍵字加分
+  use_ptt_score: true
+  # PTT 提及次數加分權重
+  ptt_mention_weight: 0.2
+
+# === 技術面條件 ===
+tech_filter:
+  # 均線糾結:5/10/20 日均線收斂在 5% 內
+  ma_glued_threshold: 0.05
+  # 股價必須在布林中軌或以下: "lower" / "middle" / "upper"
+  bollinger_position_max: "middle"
+  # 近 20 日漲幅必須 < 15%(過濾已大漲)
+  recent_gain_max: 0.15
+  # 股價必須 > 季線(基本多頭結構)
+  price_above_ma60: true
+
+# === 基本面條件 ===
+fundamental_filter:
+  # 滿足以下任一條件即可
+  conditions:
+    - monthly_revenue_yoy_min: 0      # 月營收年增 >= 0
+    - quarterly_eps_min: 0            # 或 Q EPS >= 0
+  # 排除條件
+  exclude:
+    - loss_recent_year: true          # 近一年虧損
+    - capital_deficit_over_half: true # 累積虧損 > 1/2 資本額
+
+# === 評分權重(總和需 = 1.0)===
+scoring:
+  chip_weight: 0.40
+  tech_weight: 0.30
+  fundamental_weight: 0.30
+
+# === 輸出設定 ===
+output:
+  # 最多輸出 N 檔
+  top_n: 5
+  # 總分 < 此值不輸出
+  min_total_score: 60
+
+# === 排除清單(永久排除) ===
+exclude_stocks:
+  - "0050"
+  - "0056"
+  # 加入其他不想看的標的
+
+# === 排除產業 ===
+exclude_industries:
+  - "ETF"
+  - "存託憑證"
+
+# === PTT 關鍵字搜尋 ===
+ptt_keywords:
+  - "主力"
+  - "吃貨"
+  - "佈局"
+  - "默默"
+  - "進駐"
+  - "贏家分點"
+  - "籌碼集中"
+  - "連續買超"
+  - "地緣券商"

@@ -1,0 +1,77 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# === 虛擬環境 ===
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# === 環境變數與機密 ===
+.env
+.env.local
+*.pem
+*-credentials.json
+service_account*.json
+
+# === 測試與覆蓋率 ===
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# === 型別檢查與 Lint 快取 ===
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# === Jupyter ===
+.ipynb_checkpoints
+*.ipynb
+
+# === 專案輸出 ===
+output/*
+!output/.gitkeep
+logs/
+*.log
+
+# === OS ===
+Thumbs.db
+desktop.ini
