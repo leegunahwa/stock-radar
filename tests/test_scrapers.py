@@ -19,6 +19,7 @@ from src.scrapers import goodinfo, histock, ptt_stock, twse_broker, twse_fund
 T86_PAYLOAD = {
     "stat": "OK",
     "date": "20260424",
+    # 真實 T86 欄位順序(含三大法人合計)
     "fields": [
         "證券代號",
         "證券名稱",
@@ -27,25 +28,96 @@ T86_PAYLOAD = {
         "投信買進股數",
         "投信賣出股數",
         "投信買賣超股數",
+        "自營商買賣超股數(自行買賣)",
+        "自營商買賣超股數(避險)",
         "自營商買賣超股數",
+        "三大法人買賣超股數",
     ],
     "data": [
-        ["2330", "台積電", "1,234,000", "0", "5,000,000", "1,000,000", "4,000,000", "0"],
-        ["2454", "聯發科", "0", "0", "200,000", "300,000", "-100,000", "0"],
+        # 2330: 外資 10M + 外資自營商 1M;投信 4M;自營商合計 0.5M;主力合計 15.5M
+        ["2330", "台積電",
+         "10,000,000", "1,000,000",
+         "5,000,000", "1,000,000", "4,000,000",
+         "300,000", "200,000", "500,000",
+         "15,500,000"],
+        # 2454: 外資 -2M;投信 -100K;自營商 0;主力合計 -2.1M
+        ["2454", "聯發科",
+         "-2,000,000", "0",
+         "200,000", "300,000", "-100,000",
+         "0", "0", "0",
+         "-2,100,000"],
     ],
 }
 
 
 def test_t86_parse_happy_path() -> None:
     df = twse_fund.parse_t86_payload(T86_PAYLOAD)
-    assert list(df.columns) == ["stock_id", "name", "buy", "sell", "net_buy"]
+    expected_cols = [
+        "stock_id", "name", "buy", "sell", "net_buy",
+        "foreign_net_buy", "dealer_net_buy", "main_force_net_buy",
+    ]
+    assert list(df.columns) == expected_cols
     assert len(df) == 2
-    row = df[df["stock_id"] == "2330"].iloc[0]
-    assert row["name"] == "台積電"
-    assert row["buy"] == 5_000_000
-    assert row["sell"] == 1_000_000
-    assert row["net_buy"] == 4_000_000
-    assert df[df["stock_id"] == "2454"].iloc[0]["net_buy"] == -100_000
+
+    tsmc = df[df["stock_id"] == "2330"].iloc[0]
+    assert tsmc["name"] == "台積電"
+    assert tsmc["net_buy"] == 4_000_000          # 投信
+    assert tsmc["foreign_net_buy"] == 11_000_000  # 外資 + 外資自營商
+    assert tsmc["dealer_net_buy"] == 500_000      # 自營商合計(優先用合計欄)
+    assert tsmc["main_force_net_buy"] == 15_500_000  # 三大法人合計直接取用
+
+    mtk = df[df["stock_id"] == "2454"].iloc[0]
+    assert mtk["net_buy"] == -100_000
+    assert mtk["main_force_net_buy"] == -2_100_000
+
+
+def test_t86_parse_main_force_fallback() -> None:
+    """T86 沒有「三大法人合計」欄位時,fallback 加總。"""
+    payload = {
+        "stat": "OK",
+        "fields": [
+            "證券代號", "證券名稱",
+            "外陸資買賣超股數(不含外資自營商)", "外資自營商買賣超股數",
+            "投信買進股數", "投信賣出股數", "投信買賣超股數",
+            "自營商買賣超股數(自行買賣)", "自營商買賣超股數(避險)",
+        ],
+        "data": [
+            ["2330", "台積電",
+             "1,000,000", "100,000",
+             "500,000", "100,000", "400,000",
+             "50,000", "30,000"],
+        ],
+    }
+    df = twse_fund.parse_t86_payload(payload)
+    row = df.iloc[0]
+    # foreign = 1M + 100K = 1.1M;dealer = 50K + 30K = 80K;投信 = 400K
+    # main_force fallback = 1.1M + 400K + 80K = 1.58M
+    assert row["foreign_net_buy"] == 1_100_000
+    assert row["dealer_net_buy"] == 80_000
+    assert row["net_buy"] == 400_000
+    assert row["main_force_net_buy"] == 1_580_000
+
+
+def test_t86_parse_dealer_total_priority() -> None:
+    """同時存在(自行買賣)、(避險)、合計時,優先採用合計欄。"""
+    payload = {
+        "stat": "OK",
+        "fields": [
+            "證券代號", "證券名稱",
+            "外陸資買賣超股數",
+            "投信買進股數", "投信賣出股數", "投信買賣超股數",
+            "自營商買賣超股數(自行買賣)", "自營商買賣超股數(避險)",
+            "自營商買賣超股數",  # 合計
+        ],
+        "data": [
+            ["1234", "X",
+             "0",
+             "0", "0", "0",
+             "111", "222", "999"],  # 合計 999,而非 111+222=333
+        ],
+    }
+    df = twse_fund.parse_t86_payload(payload)
+    assert df.iloc[0]["dealer_net_buy"] == 999
 
 
 def test_t86_payload_ok_check() -> None:

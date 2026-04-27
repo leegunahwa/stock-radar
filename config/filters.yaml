@@ -9,7 +9,13 @@
 chip_filter:
   # 投信當日買超門檻(張)
   min_investment_trust_buy: 1000
-  # 連續買超天數(連續 N 天有買超才入選)
+  # 主力(三大法人合計)當日買超門檻(張)
+  min_main_force_buy: 3000
+  # 投信 / 主力 達標模式:
+  #   "any" → 任一達標即通過(預設,較寬鬆)
+  #   "all" → 兩者皆需達標(較嚴格)
+  chip_match_mode: "any"
+  # 連續買超天數(連續 N 天有「投信」買超才入選)
   consecutive_buy_days: 3
   # 是否納入 PTT 關鍵字加分
   use_ptt_score: true

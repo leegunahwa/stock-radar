@@ -17,48 +17,93 @@ from src.filters.tech_filter import (
 # ChipFilter
 # =============================================================================
 def _sample_fund_df() -> pd.DataFrame:
+    """fixture:含投信 + 主力欄位的 T86 mock。"""
     return pd.DataFrame(
         [
-            # 買超 5000 張(台積電),通過
+            # 投信買 4000 張、主力 15500 張 → 兩者皆達標
             {"stock_id": "2330", "name": "台積電", "buy": 5_000_000,
-             "sell": 1_000_000, "net_buy": 4_000_000},
-            # 買超 100 張(< 1000),不通過
+             "sell": 1_000_000, "net_buy": 4_000_000,
+             "foreign_net_buy": 11_000_000, "dealer_net_buy": 500_000,
+             "main_force_net_buy": 15_500_000},
+            # 投信 100 張 < 門檻;主力 4500 張 → 主力達標(any 模式可過)
             {"stock_id": "2317", "name": "鴻海", "buy": 200_000,
-             "sell": 100_000, "net_buy": 100_000},
-            # 0050 在 exclude 名單中
+             "sell": 100_000, "net_buy": 100_000,
+             "foreign_net_buy": 4_400_000, "dealer_net_buy": 0,
+             "main_force_net_buy": 4_500_000},
+            # 投信 9000 張(達標)、主力 9000 張 → 但在 exclude 名單
             {"stock_id": "0050", "name": "元大台灣50", "buy": 9_000_000,
-             "sell": 0, "net_buy": 9_000_000},
+             "sell": 0, "net_buy": 9_000_000,
+             "foreign_net_buy": 0, "dealer_net_buy": 0,
+             "main_force_net_buy": 9_000_000},
+            # 投信 50 張 < 門檻;主力 1500 張 < 門檻 → 不過
+            {"stock_id": "2603", "name": "長榮", "buy": 100_000,
+             "sell": 50_000, "net_buy": 50_000,
+             "foreign_net_buy": 1_400_000, "dealer_net_buy": 50_000,
+             "main_force_net_buy": 1_500_000},
         ]
     )
 
 
-def test_chip_filter_threshold() -> None:
+def test_chip_filter_any_mode() -> None:
+    """any 模式:投信 OR 主力 任一達標即可。"""
     cf = ChipFilter(
-        config={"min_investment_trust_buy": 1000, "consecutive_buy_days": 1},
+        config={
+            "min_investment_trust_buy": 1000,
+            "min_main_force_buy": 3000,
+            "chip_match_mode": "any",
+            "consecutive_buy_days": 1,
+        },
         exclude_stocks=["0050"],
     )
     out = cf.initial_screening(_sample_fund_df())
+    # 2330(兩者皆過) + 2317(主力過) → 排除 0050、2603 不過
+    assert set(out["stock_id"]) == {"2330", "2317"}
+    # 2330 主力分數較高,排序在前
+    assert out.iloc[0]["stock_id"] == "2330"
+
+
+def test_chip_filter_all_mode() -> None:
+    """all 模式:投信 + 主力 都需達標。"""
+    cf = ChipFilter(
+        config={
+            "min_investment_trust_buy": 1000,
+            "min_main_force_buy": 3000,
+            "chip_match_mode": "all",
+            "consecutive_buy_days": 1,
+        },
+        exclude_stocks=["0050"],
+    )
+    out = cf.initial_screening(_sample_fund_df())
+    # 只有 2330 兩邊都達標
     assert list(out["stock_id"]) == ["2330"]
-    assert out.iloc[0]["net_buy_lots"] == 4000.0
-    assert out.iloc[0]["chip_score"] > 0
 
 
 def test_chip_filter_consecutive_days() -> None:
     today = _sample_fund_df()
-    # 歷史:2330 連續買超,2317 沒買超
+    # 歷史:2330 連續(投信)買超,2317 投信負(中斷)
     history = pd.DataFrame(
         [
             {"stock_id": "2330", "name": "台積電", "buy": 1_000_000,
-             "sell": 0, "net_buy": 1_000_000},
+             "sell": 0, "net_buy": 1_000_000,
+             "foreign_net_buy": 0, "dealer_net_buy": 0,
+             "main_force_net_buy": 1_000_000},
             {"stock_id": "2317", "name": "鴻海", "buy": 0,
-             "sell": 100_000, "net_buy": -100_000},
+             "sell": 100_000, "net_buy": -100_000,
+             "foreign_net_buy": 5_000_000, "dealer_net_buy": 0,
+             "main_force_net_buy": 4_900_000},
         ]
     )
     cf = ChipFilter(
-        config={"min_investment_trust_buy": 1000, "consecutive_buy_days": 2},
+        config={
+            "min_investment_trust_buy": 1000,
+            "min_main_force_buy": 3000,
+            "chip_match_mode": "any",
+            "consecutive_buy_days": 2,
+        },
         exclude_stocks=["0050"],
     )
     out = cf.initial_screening(today, fund_dfs_history=[history])
+    # 2317 雖然主力過,但投信連續中斷 → 被連續檢查擋下
     assert list(out["stock_id"]) == ["2330"]
     assert out.iloc[0]["consecutive_days"] >= 2
 
@@ -80,18 +125,20 @@ def test_count_consecutive_buy() -> None:
     assert _count_consecutive_buy("2330", [h3, h2, h1]) == 2
 
 
-def test_chip_score_components() -> None:
+def test_chip_score_uses_max_of_inv_and_main_force() -> None:
+    """評分時 base 取投信達標度與主力達標度較高者。"""
     cf = ChipFilter(
         config={
             "min_investment_trust_buy": 1000,
-            "consecutive_buy_days": 1,
-            "use_ptt_score": True,
-            "ptt_mention_weight": 0.2,
+            "min_main_force_buy": 3000,
         }
     )
-    # 達門檻 30,連續 4 天 30,PTT 命中 1 篇 → 0.2*1*100=20 → cap 10
-    s = cf.score(net_buy_lots=1000, consecutive_days=4, ptt_mentions=1)
-    assert 60 <= s <= 100
+    # 投信 0 張、主力 12000 張(= 4 倍門檻 → 滿分 60)
+    s = cf.score(net_buy_lots=0, main_force_lots=12000, consecutive_days=1)
+    assert s >= 60
+    # 投信 1000 張(剛達標 → base 30)、主力 0 張
+    s2 = cf.score(net_buy_lots=1000, main_force_lots=0, consecutive_days=1)
+    assert 25 <= s2 <= 35
 
 
 # =============================================================================

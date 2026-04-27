@@ -48,14 +48,17 @@ def _build_html(candidates: list[dict[str, Any]], date: str) -> str:
     rows_html = ""
     for i, c in enumerate(candidates, 1):
         tech = c.get("tech") or {}
-        chip_net_buy = c.get("chip", {}).get("net_buy_lots", c.get("net_buy_lots", "-"))
+        chip = c.get("chip") or {}
+        inv_lots = chip.get("net_buy_lots", c.get("net_buy_lots", "-"))
+        main_lots = chip.get("main_force_lots", c.get("main_force_lots", "-"))
         rows_html += f"""
             <tr>
               <td>{i}</td>
               <td><b>{c.get('stock_id', '')}</b></td>
               <td>{c.get('name', '')}</td>
               <td>{tech.get('price', '-')}</td>
-              <td>{chip_net_buy}</td>
+              <td>{_fmt_lots(inv_lots)}</td>
+              <td>{_fmt_lots(main_lots)}</td>
               <td>{c.get('score', '-')}</td>
             </tr>"""
 
@@ -69,7 +72,7 @@ def _build_html(candidates: list[dict[str, Any]], date: str) -> str:
     <thead style="background: #f0f0f0;">
       <tr>
         <th>排名</th><th>代號</th><th>名稱</th>
-        <th>現價</th><th>投信買超(張)</th><th>總分</th>
+        <th>現價</th><th>投信買超(張)</th><th>主力買超(張)</th><th>總分</th>
       </tr>
     </thead>
     <tbody>{rows_html}
@@ -82,3 +85,11 @@ def _build_html(candidates: list[dict[str, Any]], date: str) -> str:
 </body>
 </html>
 """
+
+
+def _fmt_lots(value: Any) -> str:
+    """格式化「張」數值;非數字維持原樣。"""
+    try:
+        return f"{float(value):,.0f}"
+    except (TypeError, ValueError):
+        return str(value)
