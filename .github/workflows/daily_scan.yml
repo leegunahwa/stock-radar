@@ -3,14 +3,32 @@ name: Daily Stock Scan
 # =============================================================================
 # 每個交易日台北時間 15:30(收盤後 30 分)執行台股籌碼掃描
 # GitHub Actions 用 UTC,15:30 (UTC+8) = 07:30 UTC
-# 完整實作將於 Stage 4 補上,本檔目前為框架
 # =============================================================================
 
 on:
   schedule:
     # 週一至週五 07:30 UTC = 台北時間 15:30
     - cron: '30 7 * * 1-5'
-  workflow_dispatch:  # 允許手動觸發
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "指定日期 YYYYMMDD(留空 = 今日)"
+        required: false
+        default: ""
+      use_finmind:
+        description: "改用 FinMind 取代 Goodinfo"
+        type: boolean
+        required: false
+        default: false
+      mock:
+        description: "使用內建 mock 資料(端到端驗證,不打外部網路)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  issues: write   # 失敗時自動開 issue 需要
 
 jobs:
   scan:
@@ -28,20 +46,40 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: |
+          pip install pytest
+          pytest tests/ -v
 
       - name: Run scanner
         env:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           EMAIL_SMTP_HOST: ${{ secrets.EMAIL_SMTP_HOST }}
+          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
           EMAIL_SMTP_USER: ${{ secrets.EMAIL_SMTP_USER }}
           EMAIL_SMTP_PASS: ${{ secrets.EMAIL_SMTP_PASS }}
           NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python -m src.main
+          LOG_LEVEL: INFO
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ inputs.date }}"
+          fi
+          if [ "${{ inputs.use_finmind }}" = "true" ]; then
+            ARGS="$ARGS --use-finmind"
+          fi
+          if [ "${{ inputs.mock }}" = "true" ]; then
+            ARGS="$ARGS --mock"
+          fi
+          python -m src.main $ARGS
 
-      - name: Upload results
+      - name: Upload output artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -49,3 +87,17 @@ jobs:
           path: output/
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Notify on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().split('T')[0];
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Failed] Daily Scan ${today}`,
+              body: `每日掃描 workflow 執行失敗。\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['bug', 'auto-generated']
+            });

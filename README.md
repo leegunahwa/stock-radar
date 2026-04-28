@@ -85,8 +85,21 @@ cp .env.example .env
 ### 4. 本地執行
 
 ```bash
-python -m src.main
+python -m src.main                  # 真實流程,抓今日資料
+python -m src.main --date 20260424  # 指定日期
+python -m src.main --mock           # 用內建 mock 資料端到端驗證,不打外網
+python -m src.main --use-finmind    # 改用 FinMind 取代 Goodinfo
 ```
+
+執行結果**永遠**會寫到 `output/{date}.json` 與 `output/{date}.html`(本機備份)。
+若同時設定了 Sheet / SMTP credentials,則額外寫入 Google Sheet 與寄送 Email。
+
+### 部分設定也 OK
+
+- 沒設 Google credentials → 只跳過 Sheet 寫入,本機 JSON 仍保留。
+- 沒設 SMTP credentials → 只跳過 Email,本機 HTML 仍保留。
+- 兩者皆無 → 仍可正常跑,只在 `output/` 看結果。
+- 寫入 / 寄送過程任何錯誤都只 log warning,不會中斷流程。
 
 ---
 
@@ -133,7 +146,20 @@ python -m src.main
 ### 步驟 5:測試運作
 
 到 GitHub repo 的 **Actions** 頁籤 → **Daily Stock Scan** → **Run workflow**,
-手動觸發一次驗證所有設定。
+可帶以下參數:
+
+- **date**:留空 = 今日;或填 `YYYYMMDD` 跑歷史日期。
+- **use_finmind**:勾選 → 改用 FinMind API。
+- **mock**:勾選 → 用內建 mock 資料,不打外網(用來驗證流程與 Sheet/SMTP 設定)。
+
+> 💡 **建議第一次驗證**:勾 `mock` 跑一次,確認 Google Sheet 真的會新增工作表、
+> 收件信箱真的收到信。確認後再正常跑真實資料。
+
+### 失敗自動通知
+
+定時排程(`schedule`)失敗時會自動在 repo 開一個 issue
+(label: `bug`、`auto-generated`),不需要每天上 Actions 看狀態。
+手動 `workflow_dispatch` 失敗則不會開 issue,避免測試時刷洗。
 
 ---
 
