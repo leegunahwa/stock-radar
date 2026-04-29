@@ -6,7 +6,7 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+# dist/  # update by Leo 2026-04-29 & 保留 dist/ 供 GitHub Pages 使用
 downloads/
 eggs/
 .eggs/
