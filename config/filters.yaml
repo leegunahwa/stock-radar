@@ -44,11 +44,36 @@ fundamental_filter:
     - loss_recent_year: true          # 近一年虧損
     - capital_deficit_over_half: true # 累積虧損 > 1/2 資本額
 
-# === 評分權重(總和需 = 1.0)===
+# === 融資融券條件 === # update by Leo 2026-04-29
+margin_filter:
+  # 融資減少加分
+  margin_decrease_bonus: 15
+  # 券資比門檻（%）
+  high_short_ratio: 30
+  mid_short_ratio: 20
+  # 融資增幅超過此 % 視為散戶追買（扣分）
+  margin_surge_pct: 10
+  # 外資大量買超門檻（張）
+  foreign_large_lots: 3000
+
+# === 成交量條件 === # update by Leo 2026-04-29
+volume_filter:
+  # 極度縮量：當日量 / 5日均量 <= 此值
+  shrink_extreme_ratio: 0.5
+  # 溫和縮量
+  shrink_mild_ratio: 0.7
+  # 爆量：當日量 / 20日均量 >= 此值
+  surge_extreme_ratio: 2.0
+  # 溫和放量
+  surge_mild_ratio: 1.5
+
+# === 評分權重(總和需 = 1.0)=== # update by Leo 2026-04-29 & 新增融資融券+成交量權重
 scoring:
-  chip_weight: 0.40
-  tech_weight: 0.30
-  fundamental_weight: 0.30
+  chip_weight: 0.30
+  margin_weight: 0.15
+  tech_weight: 0.25
+  volume_weight: 0.10
+  fundamental_weight: 0.20
 
 # === 輸出設定 ===
 output:

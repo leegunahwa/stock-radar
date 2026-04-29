@@ -25,9 +25,9 @@ from typing import Any
 
 import pandas as pd
 
-from src.filters import ChipFilter, FundamentalFilter, TechFilter
+from src.filters import ChipFilter, FundamentalFilter, MarginFilter, TechFilter, VolumeFilter
 from src.filters.tech_filter import bollinger_position, ma_glued_ratio
-from src.scrapers import histock, twse_fund
+from src.scrapers import histock, twse_fund, twse_margin, twse_volume
 from src.utils.config import load_config
 from src.utils.logger import setup_logger
 from src.utils.trading_calendar import (
@@ -50,12 +50,16 @@ def calculate_total_score(
     tech_score: float,
     fundamental_score: float,
     weights: dict[str, float],
+    margin_score: float = 0,
+    volume_score: float = 0,
 ) -> float:
-    """依權重組合三項分數。"""
+    """依權重組合五項分數。"""  # update by Leo 2026-04-29 & 加入融資融券+成交量
     total = (
-        chip_score * weights.get("chip_weight", 0.4)
-        + tech_score * weights.get("tech_weight", 0.3)
-        + fundamental_score * weights.get("fundamental_weight", 0.3)
+        chip_score * weights.get("chip_weight", 0.30)
+        + margin_score * weights.get("margin_weight", 0.15)
+        + tech_score * weights.get("tech_weight", 0.25)
+        + volume_score * weights.get("volume_weight", 0.10)
+        + fundamental_score * weights.get("fundamental_weight", 0.20)
     )
     return round(total, 2)
 
@@ -65,10 +69,13 @@ def calculate_total_score(
 # ----------------------------------------------------------------------
 def enrich_stock(
     stock_id: str,
+    date: str,
     use_finmind: bool = False,
-) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
-    """抓取單一個股的技術面 + 基本面資料。"""
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None, dict[str, Any]]:
+    """抓取單一個股的技術面 + 基本面 + 成交量資料。"""
+    # update by Leo 2026-04-29 & 新增成交量抓取
     tech = histock.get_technical(stock_id)
+    volume = twse_volume.get_volume_stats(stock_id, date)
 
     if use_finmind:
         from src.scrapers import finmind
@@ -81,7 +88,7 @@ def enrich_stock(
         revenue = goodinfo.get_monthly_revenue(stock_id)
         eps = goodinfo.get_quarterly_eps(stock_id)
 
-    return tech, revenue, eps
+    return tech, revenue, eps, volume
 
 
 # ----------------------------------------------------------------------
@@ -118,17 +125,21 @@ def run(
         today = prev
 
     # ------------------------------------------------------------------
-    # Step 1: 籌碼面初篩
+    # Step 1: 籌碼面初篩 + 融資融券  # update by Leo 2026-04-29
     # ------------------------------------------------------------------
     logger.info("=" * 60)
-    logger.info(f"Step 1: 抓取投信買賣超({today})")
+    logger.info(f"Step 1: 抓取投信買賣超 + 融資融券({today})")
     if mock:
         fund_today, fund_history = _mock_fund_data(today)
+        margin_df = _mock_margin_data()
     else:
         fund_today = twse_fund.get_investment_trust_buy(today)
         fund_history = _fetch_history_fund(
             today, days=int(config.get("chip_filter", {}).get("consecutive_buy_days", 1))
         )
+        margin_df = twse_margin.get_margin_data(today)
+
+    logger.info(f"融資融券資料: {len(margin_df)} 檔")
 
     chip_filter = ChipFilter(
         config=config.get("chip_filter", {}),
@@ -144,12 +155,14 @@ def run(
         return []
 
     # ------------------------------------------------------------------
-    # Step 2: 抓技術面 + 基本面
+    # Step 2: 抓技術面 + 基本面 + 成交量  # update by Leo 2026-04-29
     # ------------------------------------------------------------------
     logger.info("=" * 60)
-    logger.info(f"Step 2: 抓取候選股技術面 + 基本面(共 {len(candidates_df)} 檔)")
+    logger.info(f"Step 2: 抓取候選股技術面 + 基本面 + 成交量(共 {len(candidates_df)} 檔)")
     tech_filter = TechFilter(config.get("tech_filter", {}))
     fund_filter = FundamentalFilter(config.get("fundamental_filter", {}))
+    margin_filter = MarginFilter(config.get("margin_filter", {}))
+    volume_filter = VolumeFilter(config.get("volume_filter", {}))
 
     enriched: list[dict[str, Any]] = []
     for _, row in candidates_df.iterrows():
@@ -157,11 +170,23 @@ def run(
         try:
             if mock:
                 tech, revenue, eps = _mock_stock_detail(stock_id)
+                volume = _mock_volume_data(stock_id)
             else:
-                tech, revenue, eps = enrich_stock(stock_id, use_finmind=use_finmind)
+                tech, revenue, eps, volume = enrich_stock(
+                    stock_id, date=today, use_finmind=use_finmind,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"{stock_id} 抓取失敗,略過: {exc}")
             continue
+
+        # 合併融資融券資料
+        margin_row = margin_df[margin_df["stock_id"] == stock_id]
+        margin = margin_row.iloc[0].to_dict() if not margin_row.empty else None
+
+        # 外資連續買超天數
+        foreign_consec = _count_consecutive_foreign(stock_id, fund_history) + (
+            1 if row.get("foreign_net_buy", 0) > 0 else 0
+        )
 
         enriched.append(
             {
@@ -171,14 +196,17 @@ def run(
                 "tech": tech,
                 "revenue": revenue,
                 "eps": eps,
+                "volume": volume,
+                "margin": margin,
+                "foreign_consecutive": foreign_consec,
             }
         )
 
     # ------------------------------------------------------------------
-    # Step 3: 套用 tech / fundamental filter,計算總分
+    # Step 3: 五層篩選與評分  # update by Leo 2026-04-29
     # ------------------------------------------------------------------
     logger.info("=" * 60)
-    logger.info("Step 3: 技術面 + 基本面篩選與評分")
+    logger.info("Step 3: 五層篩選與評分（籌碼+融資融券+技術+成交量+基本面）")
     final: list[dict[str, Any]] = []
     for stock in enriched:
         if not tech_filter.is_low_basis(stock["tech"]):
@@ -188,10 +216,27 @@ def run(
             logger.debug(f"  {stock['stock_id']} 基本面未過")
             continue
 
-        chip_s = float(stock["chip"].get("chip_score", 0))
+        chip = stock["chip"]
+        chip_s = float(chip.get("chip_score", 0))
         tech_s = tech_filter.score(stock["tech"])
         fund_s = fund_filter.score(stock["revenue"], stock["eps"])
-        total = calculate_total_score(chip_s, tech_s, fund_s, weights)
+
+        foreign_lots = float(chip.get("foreign_net_buy", 0)) / 1000
+        inv_lots = float(chip.get("net_buy_lots", 0))
+        inv_consec = int(chip.get("consecutive_days", 1))
+        margin_s = margin_filter.score(
+            stock["margin"],
+            foreign_net_lots=foreign_lots,
+            inv_net_lots=inv_lots,
+            foreign_consecutive=stock.get("foreign_consecutive", 0),
+            inv_consecutive=inv_consec,
+        )
+        volume_s = volume_filter.score(stock["volume"])
+
+        total = calculate_total_score(
+            chip_s, tech_s, fund_s, weights,
+            margin_score=margin_s, volume_score=volume_s,
+        )
 
         if total < min_total:
             logger.debug(
@@ -205,6 +250,8 @@ def run(
                 "chip_score": chip_s,
                 "tech_score": tech_s,
                 "fundamental_score": fund_s,
+                "margin_score": margin_s,
+                "volume_score": volume_s,
                 "score": total,
             }
         )
@@ -219,7 +266,7 @@ def run(
     logger.info("=" * 60)
     logger.info("Step 4: 輸出 JSON")
 
-    # 簡短摘要
+    # 簡短摘要  # update by Leo 2026-04-29 & 加入新欄位
     for i, c in enumerate(top, 1):
         tech = c["tech"] or {}
         chip = c["chip"] or {}
@@ -229,7 +276,9 @@ def run(
             f"  #{i} {c['stock_id']} {c['name']} "
             f"price={tech.get('price')} 投信={inv_lots} 主力={main_lots} "
             f"score={c['score']} "
-            f"(chip={c['chip_score']} tech={c['tech_score']} fund={c['fundamental_score']})"
+            f"(chip={c['chip_score']} margin={c.get('margin_score',0)} "
+            f"tech={c['tech_score']} vol={c.get('volume_score',0)} "
+            f"fund={c['fundamental_score']})"
         )
 
     # update by Leo 2026-04-28 & 組裝攤平 JSON 並寫檔
@@ -275,10 +324,13 @@ def build_json_output(
 
 def _flatten_stock(rank: int, c: dict[str, Any]) -> dict[str, Any]:
     """將單一候選股的巢狀結構攤平為一層 dict。"""
+    # update by Leo 2026-04-29 & 加入融資融券+外資+成交量欄位
     tech = c.get("tech") or {}
     chip = c.get("chip") or {}
     revenue = c.get("revenue") or {}
     eps = c.get("eps") or {}
+    margin = c.get("margin") or {}
+    volume = c.get("volume") or {}
 
     ma_vals = [tech.get(k) for k in ("ma5", "ma10", "ma20")]
     glued = ma_glued_ratio(*ma_vals)
@@ -295,18 +347,34 @@ def _flatten_stock(rank: int, c: dict[str, Any]) -> dict[str, Any]:
         "name": c.get("name", ""),
         "price": tech.get("price"),
         "change": tech.get("change"),
+        # 籌碼面
         "inv_buy_lots": _safe_round(chip.get("net_buy_lots"), 0),
         "main_force_lots": _safe_round(chip.get("main_force_lots"), 0),
+        "foreign_buy_lots": _safe_round(float(chip.get("foreign_net_buy", 0)) / 1000, 0),
         "consecutive_days": chip.get("consecutive_days", 1),
+        "foreign_consecutive": c.get("foreign_consecutive", 0),
+        # 融資融券
+        "margin_change": margin.get("margin_change", 0),
+        "short_change": margin.get("short_change", 0),
+        "short_margin_ratio": _safe_round(margin.get("short_margin_ratio"), 2),
+        # 技術面
         "gain_20d": _safe_round(tech.get("gain_20d"), 4),
         "ma_glued": _safe_round(glued, 4),
         "boll_position": boll_pos,
+        # 成交量
+        "today_volume": _safe_round(volume.get("today_volume"), 0),
+        "vol_ratio_5": _safe_round(volume.get("vol_ratio_5"), 2),
+        "vol_ratio_20": _safe_round(volume.get("vol_ratio_20"), 2),
+        # 基本面
         "revenue_month": revenue.get("month"),
         "revenue_yoy": _safe_round(revenue.get("yoy"), 2),
         "eps_quarter": eps.get("quarter"),
         "eps": _safe_round(eps.get("eps"), 2),
+        # 五項分數
         "chip_score": _safe_round(c.get("chip_score"), 2),
+        "margin_score": _safe_round(c.get("margin_score"), 2),
         "tech_score": _safe_round(c.get("tech_score"), 2),
+        "volume_score": _safe_round(c.get("volume_score"), 2),
         "fundamental_score": _safe_round(c.get("fundamental_score"), 2),
         "total_score": _safe_round(c.get("score"), 2),
     }
@@ -320,6 +388,29 @@ def _safe_round(value: Any, digits: int) -> Any:
         return round(float(value), digits)
     except (TypeError, ValueError):
         return None
+
+
+# ----------------------------------------------------------------------
+# 外資連續買超計算  # update by Leo 2026-04-29
+# ----------------------------------------------------------------------
+def _count_consecutive_foreign(
+    stock_id: str, history_dfs: list[pd.DataFrame],
+) -> int:
+    """從歷史 DataFrame 計算外資連續買超天數。"""
+    count = 0
+    for hist_df in reversed(history_dfs):
+        if hist_df is None or hist_df.empty:
+            break
+        if "foreign_net_buy" not in hist_df.columns:
+            break
+        row = hist_df[hist_df["stock_id"] == stock_id]
+        if row.empty:
+            break
+        if row["foreign_net_buy"].iloc[0] > 0:
+            count += 1
+        else:
+            break
+    return count
 
 
 # ----------------------------------------------------------------------
@@ -463,7 +554,6 @@ def _mock_stock_detail(
     }
     profile = profiles.get(stock_id)
     if not profile:
-        # 未列出的標的給空殼
         empty_tech = {
             k: None
             for k in [
@@ -473,6 +563,50 @@ def _mock_stock_detail(
         }
         return empty_tech, None, None
     return profile["tech"], profile["revenue"], profile["eps"]
+
+
+# update by Leo 2026-04-29 & 新增融資融券與成交量 mock 資料
+def _mock_margin_data() -> pd.DataFrame:
+    """mock 融資融券資料。"""
+    data = [
+        ("2330", "台積電",   100, 200, 50000, -100, 50, 80, 3000,  50, 6.0),
+        ("2454", "聯發科",    80, 150, 30000,  -70, 30, 40, 2000,  10, 6.7),
+        ("2317", "鴻海",     200, 100, 80000,  100, 20, 50, 5000,  30, 6.3),
+        ("3711", "日月光投控", 50,  30, 20000,  20, 60, 20, 8000,  40, 40.0),
+        ("2891", "中信金",    30,  50, 15000,  -20, 10, 15, 1000, -5,  6.7),
+        ("2603", "長榮",     300, 100, 60000,  200, 10, 30, 4000,  20, 6.7),
+        ("9999", "虧損股",    80,  40, 10000,   40, 20, 10, 1500,  10, 15.0),
+    ]
+    return pd.DataFrame(data, columns=[
+        "stock_id", "name",
+        "margin_buy", "margin_sell", "margin_balance", "margin_change",
+        "short_buy", "short_sell", "short_balance", "short_change",
+        "short_margin_ratio",
+    ])
+
+
+def _mock_volume_data(stock_id: str) -> dict[str, Any]:
+    """mock 成交量資料。"""
+    profiles = {
+        "2330": {"today_volume": 25000, "vol_5ma": 30000, "vol_20ma": 28000,
+                 "vol_ratio_5": 0.83, "vol_ratio_20": 0.89},
+        "2454": {"today_volume": 8000,  "vol_5ma": 18000, "vol_20ma": 15000,
+                 "vol_ratio_5": 0.44, "vol_ratio_20": 0.53},
+        "2317": {"today_volume": 50000, "vol_5ma": 25000, "vol_20ma": 22000,
+                 "vol_ratio_5": 2.0,  "vol_ratio_20": 2.27},
+        "3711": {"today_volume": 12000, "vol_5ma": 15000, "vol_20ma": 14000,
+                 "vol_ratio_5": 0.8,  "vol_ratio_20": 0.86},
+        "2891": {"today_volume": 20000, "vol_5ma": 22000, "vol_20ma": 20000,
+                 "vol_ratio_5": 0.91, "vol_ratio_20": 1.0},
+        "2603": {"today_volume": 80000, "vol_5ma": 30000, "vol_20ma": 25000,
+                 "vol_ratio_5": 2.67, "vol_ratio_20": 3.2},
+        "9999": {"today_volume": 5000,  "vol_5ma": 6000,  "vol_20ma": 5500,
+                 "vol_ratio_5": 0.83, "vol_ratio_20": 0.91},
+    }
+    return profiles.get(stock_id, {
+        "today_volume": None, "vol_5ma": None, "vol_20ma": None,
+        "vol_ratio_5": None, "vol_ratio_20": None,
+    })
 
 
 # ----------------------------------------------------------------------
