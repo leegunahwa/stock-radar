@@ -1,0 +1,129 @@
+# update by Leo 2026-04-28 & 每日掃描 + 輸出 JSON + 部署 GitHub Pages
+name: Scrape & Publish JSON
+
+on:
+  schedule:
+    # 週一至週五 07:30 UTC = 台北時間 15:30（收盤後資料已公佈）
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "指定日期 YYYYMMDD（留空 = 今日）"
+        required: false
+        default: ""
+      use_finmind:
+        description: "改用 FinMind 取代 Goodinfo"
+        type: boolean
+        required: false
+        default: false
+      mock:
+        description: "使用內建 mock 資料（端到端驗證）"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: |
+          pip install pytest
+          pytest tests/ -v
+
+      - name: Run scanner
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          LOG_LEVEL: INFO
+        run: |
+          ARGS="--output dist/data.json"
+          if [ -n "${{ inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ inputs.date }}"
+          fi
+          if [ "${{ inputs.use_finmind }}" = "true" ]; then
+            ARGS="$ARGS --use-finmind"
+          fi
+          if [ "${{ inputs.mock }}" = "true" ]; then
+            ARGS="$ARGS --mock"
+          fi
+          python -m src.main $ARGS
+
+      - name: Copy to history & update dates.json
+        run: |
+          mkdir -p dist/history
+
+          # 從 data.json 讀取 scan_date 作為歷史檔名
+          SCAN_DATE=$(python3 -c "import json; print(json.load(open('dist/data.json'))['scan_date_display'])")
+          cp dist/data.json "dist/history/${SCAN_DATE}.json"
+
+          # 清理超過 7 天的歷史檔（只保留最新 7 個）
+          cd dist/history
+          ls -1 *.json | sort -r | tail -n +8 | xargs -r rm -f
+          cd ../..
+
+          # 產出 dates.json（可用日期清單，新到舊）
+          python3 -c "
+          import json, glob, os
+          files = sorted(glob.glob('dist/history/*.json'), reverse=True)
+          dates = [os.path.basename(f).replace('.json','') for f in files]
+          with open('dist/dates.json','w',encoding='utf-8') as f:
+              json.dump(dates, f, ensure_ascii=False, indent=2)
+          "
+
+      - name: Commit & push dist/
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist/
+          # 若無變更則跳過 commit
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          SCAN_DATE=$(python3 -c "import json; print(json.load(open('dist/data.json'))['scan_date_display'])")
+          git commit -m "chore: update scan result ${SCAN_DATE}"
+          git pull --rebase origin main
+          git push origin main
+
+  deploy-pages:
+    needs: scrape
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
